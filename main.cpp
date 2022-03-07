@@ -1,4 +1,5 @@
 #include <MetalLibraryLoader.hpp>
+
 #include <numeric>
 #include <vector>
 
@@ -7,30 +8,38 @@ inline void run_example(MTL::Device* device, MetalLibraryLoader& libs, size_t si
     std::iota(in_buf.begin(), in_buf.end(), 0);   // buf == 0, 1, 2, ..., size-1
     auto byte_size = size * sizeof(float);
     auto check_result = [&](const float* res) {
-        for (int i = 0; i < size; ++i) {
-            if (std::abs(res[i] - std::sqrt((float) i)) < 0.01) continue;
+        for (unsigned i = 0U; i < size; ++i) {
+            if (std::abs(res[i] - std::sqrt(static_cast<float>(i))) < 0.01) { continue; }
             std::cerr << "Mismatch pos: " << i << ", got: " << res[i] << ", but expected: " << std::sqrt(i) << std::endl;
         }
     };
 
-    auto fun = libs.get_function("Shaders/base.metal", "sqrtf");
-    auto input = device->newBuffer(in_buf.data(), byte_size, MTL::ResourceCPUCacheModeDefaultCache);
-    auto output = device->newBuffer(byte_size, MTL::ResourceCPUCacheModeDefaultCache);
+    libs.import_metal_source("Shaders/base.metal");
+    libs.import("Shaders/hlsl_resource_binding.spv");
+    libs.import("Shaders/vadd.spv");
+    libs.import("Shaders/AAPLShaders.metal");
+    //auto fun = libs.get_kernel_function("Shaders/base.metal", "sqrtf");
+    MTL::Function* fun = libs.get_kernel_function("sqrtf");
+    //std::cout << libs << std::endl;
+    MTL::Buffer* input = device->newBuffer(in_buf.data(), byte_size, MTL::ResourceCPUCacheModeDefaultCache);
+    MTL::Buffer* output = device->newBuffer(byte_size, MTL::ResourceCPUCacheModeDefaultCache);
     {
-        auto queue = device->newCommandQueue();
+        MTL::CommandQueue* queue = device->newCommandQueue();
         NS::Error* error = nullptr;
-        auto pipeline = device->newComputePipelineState(fun, &error);
-        if (error) { report_error(error); }
-        auto sub_group_size = pipeline->threadExecutionWidth();
-        auto command_buffer = queue->commandBuffer();
+        MTL::ComputePipelineState* pipeline = device->newComputePipelineState(fun, &error);
+        if (error) {
+            report_error(error);
+            error->release();
+        }
+        size_t sub_group_size = pipeline->threadExecutionWidth();
+        MTL::CommandBuffer* command_buffer = queue->commandBuffer();
         {
-            auto encoder = command_buffer->computeCommandEncoder();
+            MTL::ComputeCommandEncoder* encoder = command_buffer->computeCommandEncoder();
             encoder->setComputePipelineState(pipeline);
-            encoder->setBuffer(input, 0, 0);
-            encoder->setBuffer(output, 0, 1);
-            encoder->dispatchThreads(MTL::Size(size, 1, 1), MTL::Size(sub_group_size, 1, 1));
+            encoder->setBuffer(input, 0U, 0U);
+            encoder->setBuffer(output, 0U, 1U);
+            encoder->dispatchThreads(MTL::Size(size, 1U, 1U), MTL::Size(sub_group_size, 1U, 1U));
             encoder->endEncoding();
-            encoder->release();
         }
         command_buffer->commit();
         command_buffer->waitUntilCompleted();
@@ -39,10 +48,11 @@ inline void run_example(MTL::Device* device, MetalLibraryLoader& libs, size_t si
         pipeline->release();
         queue->release();
     }
-    auto out = (float*) output->contents();
+    const auto out = reinterpret_cast<const float*>(output->contents());
     check_result(out);
     input->release();
     output->release();
+    fun->release();
 }
 
 

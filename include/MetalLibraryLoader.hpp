@@ -1,13 +1,14 @@
 #pragma once
 
 #include <AppleMetal.hpp>
+#include <SPIRV_Loader.hpp>
+
 #include <fstream>
 #include <iostream>
 #include <map>
 #include <optional>
 #include <sstream>
 #include <string>
-
 
 static inline void report_error(NS::Error* error) {
     if (auto msg = error->description()->cString(NS::StringEncoding::ASCIIStringEncoding)) { std::cerr << msg << std::endl; }
@@ -48,6 +49,13 @@ private:
         return lib;
     }
 
+    MTL::Library* load_library_from_spirv_shader(const std::string& shader_file) {
+        auto spv_data = load_spirv_binary(shader_file);
+        auto msl_program_string = spirv_shader_data_to_msl_program(spv_data);
+        return compile_library_from_program_string(msl_program_string);
+    }
+
+
     MTL::Library* compile_library_from_program_string(const std::string& program) {
         NS::Error* error = nullptr;
         MTL::CompileOptions* compile_options = MTL::CompileOptions::alloc();
@@ -63,6 +71,7 @@ private:
         return lib;
     }
 
+
     MTL::Library* compile_library_from_source(const std::string& source_file) {
         std::ifstream t(source_file, std::fstream::in);
         if (!t.is_open()) {
@@ -76,31 +85,36 @@ private:
 
 
 public:
-    MTL::Library* from_library(const std::string& name) {
+    MTL::Library* import_metallib(const std::string& name) {
         if (MTL::Library* ptr = lookup_cache(name)) return ptr;
         MTL::Library* loaded = load_library_from_library_file(name);
         if (loaded) { cached_libraries[name] = loaded; }
         return loaded;
     }
 
-    MTL::Library* from_program_string(const std::string& program) {
+    MTL::Library* import_metal_source_string(const std::string& program) {
         if (MTL::Library* ptr = lookup_cache(program)) return ptr;
         MTL::Library* loaded = compile_library_from_program_string(program);
         if (loaded) { cached_libraries[program] = loaded; }
         return loaded;
     }
 
-    MTL::Library* from_source_file(const std::string& shader_file) {
-        if (MTL::Library* ptr = lookup_cache(shader_file)) return ptr;
-        MTL::Library* loaded = compile_library_from_source(shader_file);
-        if (loaded) { cached_libraries[shader_file] = loaded; }
+    MTL::Library* import_metal_source(const std::string& msl_path) {
+        if (MTL::Library* ptr = lookup_cache(msl_path)) return ptr;
+        MTL::Library* loaded = compile_library_from_source(msl_path);
+        if (loaded) { cached_libraries[msl_path] = loaded; }
+        return loaded;
+    }
+
+    MTL::Library* import_spirv_shader(const std::string& spv_path) {
+        if (MTL::Library* ptr = lookup_cache(spv_path)) return ptr;
+        MTL::Library* loaded = load_library_from_spirv_shader(spv_path);
+        if (loaded) { cached_libraries[spv_path] = loaded; }
         return loaded;
     }
 
 
-    MTL::Library* from(const std::string& lib_name) {
-        if (MTL::Library* ptr = lookup_cache(lib_name)) return ptr;
-
+    MTL::Library* import(const std::string& lib_name) {
         auto endsWith = [&](std::string const& ending) {
             if (lib_name.length() >= ending.length()) {
                 return (0 == lib_name.compare(lib_name.length() - ending.length(), ending.length(), ending));
@@ -109,26 +123,64 @@ public:
             }
         };
 
-        MTL::Library* ptr;
         if (endsWith(".metal")) {
-            ptr = compile_library_from_source(lib_name);
+            return import_metal_source(lib_name);
         } else if (endsWith(".metallib") || endsWith(".air")) {
-            ptr = load_library_from_library_file(lib_name);
+            return import_metallib(lib_name);
+        } else if (endsWith(".spv")) {
+            return import_spirv_shader(lib_name);
         } else {
-            ptr = compile_library_from_program_string(lib_name);
+            return import_metal_source_string(lib_name);
         }
-        if (ptr) { cached_libraries[lib_name] = ptr; }
-        return ptr;
     }
 
-    MTL::Function* get_function(const std::string& lib_name, const std::string& func_name) {
+    MTL::Function* get_kernel_function(const std::string& lib_name, const std::string& func_name) {
         MTL::Library* lib = lookup_cache(lib_name);
         if (!lib) {
-            lib = from(lib_name);
+            lib = import(lib_name);
             if (!lib) { return nullptr; }
         }
         return lib->newFunction(NS::String::string(func_name.c_str(), NS::StringEncoding::ASCIIStringEncoding));
     }
+
+    MTL::Function* get_kernel_function(const std::string& func_name) {
+        for (const auto& lib: cached_libraries) {
+            NS::Array* names = lib.second->functionNames();
+            if (!names) continue;
+            const unsigned count = names->count();
+            for (int i = 0; i < count; ++i) {
+                auto str = reinterpret_cast<NS::String*>(names->object(i));
+                if (!str) continue;
+                if (func_name == (str->cString(NS::StringEncoding::ASCIIStringEncoding))) { return lib.second->newFunction(str); }
+            }
+        }
+        return nullptr;
+    }
+
+    friend std::ostream& operator<<(std::ostream& os, const MetalLibraryLoader& loader) {
+        for (const auto& lib: loader.cached_libraries) {
+            os << "* " << lib.first << ": \n";
+            NS::Array* names = lib.second->functionNames();
+            if (!names) continue;
+            const unsigned count = names->count();
+            for (int i = 0; i < count; ++i) {
+                auto str = reinterpret_cast<NS::String*>(names->object(i));
+                if (!str) continue;
+                os << "   * " << str->cString(NS::StringEncoding::ASCIIStringEncoding) << ":   ";
+                MTL::Function* func = lib.second->newFunction(str);
+                NS::Array* attributes = func->stageInputAttributes();
+                const unsigned attribute_count = attributes->count();
+                for (int j = 0; j < attribute_count; ++j) {
+                    auto attr = reinterpret_cast<MTL::Attribute*>(attributes->object(j));
+                    os << attr->name()->cString(NS::StringEncoding::ASCIIStringEncoding) << ", ";
+                }
+                func->release();
+                os << '\n';
+            }
+        }
+        return os;
+    }
+
 
     MetalLibraryLoader(MetalLibraryLoader const& other) = delete;
 
