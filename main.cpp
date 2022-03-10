@@ -14,13 +14,8 @@ inline void run_example(MTL::Device* device, MetalLibraryLoader& libs, size_t si
         }
     };
 
-    libs.import_metal_source("Shaders/base.metal");
-    libs.import("Shaders/hlsl_resource_binding.spv");
-    libs.import("Shaders/vadd.spv");
-    libs.import("Shaders/AAPLShaders.metal");
     //auto fun = libs.get_kernel_function("Shaders/base.metal", "sqrtf");
     MTL::Function* fun = libs.get_kernel_function("sqrtf");
-    //std::cout << libs << std::endl;
     MTL::Buffer* input = device->newBuffer(in_buf.data(), byte_size, MTL::ResourceCPUCacheModeDefaultCache);
     MTL::Buffer* output = device->newBuffer(byte_size, MTL::ResourceCPUCacheModeDefaultCache);
     {
@@ -60,6 +55,11 @@ int main() {
     auto device = MTL::CreateSystemDefaultDevice();
     std::cout << "Running on: " << device->name()->cString(NS::StringEncoding::ASCIIStringEncoding) << std::endl;
     auto libs = MetalLibraryLoader(device);
+    libs.import_metal_source("Shaders/base.metal");
+    libs.import("Shaders/hlsl_resource_binding.spv");
+    libs.import("Shaders/vadd.spv");
+    libs.import("Shaders/AAPLShaders.metal");
+    std::cout << libs << std::endl;
     for (auto i = 1; i < 10000000; i += 1000) {
         run_example(device, libs, i);
         std::cout << i << std::endl;

@@ -7,8 +7,16 @@
 #include <iostream>
 #include <map>
 #include <optional>
+#include <random>
 #include <sstream>
 #include <string>
+
+static inline std::string gen_random_id() {
+    static std::mt19937 engine(std::random_device{}());
+    std::uniform_int_distribution<size_t> distribution{};
+    size_t i = distribution(engine);
+    return std::to_string(i);
+}
 
 static inline void report_error(NS::Error* error) {
     if (auto msg = error->description()->cString(NS::StringEncoding::ASCIIStringEncoding)) { std::cerr << msg << std::endl; }
@@ -18,6 +26,7 @@ static inline void report_error(NS::Error* error) {
 
 class MetalLibraryLoader {
 private:
+    static constexpr bool default_value_use_runtime_build = false;
     MTL::Device* device_;
     std::map<std::string, MTL::Library*> cached_libraries;
 
@@ -29,7 +38,6 @@ public:
             if (value) { value->release(); }
         }
     }
-
 
 private:
     MTL::Library* lookup_cache(const std::string& key) {
@@ -49,40 +57,61 @@ private:
         return lib;
     }
 
-    MTL::Library* load_library_from_spirv_shader(const std::string& shader_file) {
+    MTL::Library* load_library_from_spirv_shader(const std::string& shader_file, bool use_runtime_build) {
         auto spv_data = load_spirv_binary(shader_file);
         auto msl_program_string = spirv_shader_data_to_msl_program(spv_data);
-        return compile_library_from_program_string(msl_program_string);
+        return compile_library_from_program_string(msl_program_string, use_runtime_build);
     }
 
-
-    MTL::Library* compile_library_from_program_string(const std::string& program) {
-        NS::Error* error = nullptr;
-        MTL::CompileOptions* compile_options = MTL::CompileOptions::alloc();
-        compile_options->setFastMathEnabled(true);
-        compile_options->setLanguageVersion(MTL::LanguageVersion2_4);
-        MTL::Library* lib = device_->newLibrary(NS::String::string(program.c_str(), NS::StringEncoding::ASCIIStringEncoding), compile_options, &error);
-        compile_options->release();
-        if (error) {
-            report_error(error);
-            error->release();
-            return nullptr;
+    MTL::Library* compile_library_from_program_string(const std::string& program, bool use_runtime_build) {
+        MTL::Library* lib;
+        if (use_runtime_build) {
+            NS::Error* error = nullptr;
+            MTL::CompileOptions* compile_options = MTL::CompileOptions::alloc();
+            compile_options->setFastMathEnabled(true);
+            compile_options->setLanguageVersion(MTL::LanguageVersion2_4);
+            lib = device_->newLibrary(NS::String::string(program.c_str(), NS::StringEncoding::ASCIIStringEncoding), compile_options, &error);
+            compile_options->release();
+            if (error) {
+                report_error(error);
+                error->release();
+                lib = nullptr;
+            }
+        } else {
+            std::string metallib_path = "/tmp/mtl-" + gen_random_id() + ".metallib";
+            std::string build_command = "xcrun -sdk macosx metal -std=macos-metal2.4 -xmetal -Ofast -o " + metallib_path + " -";
+            std::string cleanup_command = "rm -r " + metallib_path;
+            FILE* pipe = ::popen(build_command.c_str(), "w");
+            size_t nNumWritten = fwrite(program.data(), 1, program.size(), pipe);
+            if (nNumWritten != program.size()) { return nullptr; }
+            ::pclose(pipe);
+            lib = load_library_from_library_file(metallib_path);
+            system(cleanup_command.c_str());
         }
         return lib;
     }
 
-
-    MTL::Library* compile_library_from_source(const std::string& source_file) {
-        std::ifstream t(source_file, std::fstream::in);
-        if (!t.is_open()) {
-            std::cerr << "Could not open " << source_file << std::endl;
-            return nullptr;
+    MTL::Library* compile_library_from_source(const std::string& source_file, bool use_runtime_build) {
+        MTL::Library* lib;
+        if (use_runtime_build) {
+            std::ifstream t(source_file, std::fstream::in);
+            if (!t.is_open()) {
+                std::cerr << "Could not open " << source_file << std::endl;
+                return nullptr;
+            }
+            std::stringstream buffer;
+            buffer << t.rdbuf();
+            lib = compile_library_from_program_string(buffer.str(), true);
+        } else {
+            std::string metallib_path = "/tmp/mtl-" + gen_random_id() + ".metallib";
+            std::string build_command = "xcrun -sdk macosx metal -std=macos-metal2.4 -xmetal -Ofast -o " + metallib_path + ' ' + source_file;
+            std::string cleanup_command = "rm -r " + metallib_path;
+            system(build_command.c_str());
+            lib = load_library_from_library_file(metallib_path);
+            system(cleanup_command.c_str());
         }
-        std::stringstream buffer;
-        buffer << t.rdbuf();
-        return compile_library_from_program_string(buffer.str());
+        return lib;
     }
-
 
 public:
     MTL::Library* import_metallib(const std::string& name) {
@@ -92,30 +121,29 @@ public:
         return loaded;
     }
 
-    MTL::Library* import_metal_source_string(const std::string& program) {
+    MTL::Library* import_metal_source_string(const std::string& program, bool use_runtime_build = default_value_use_runtime_build) {
         if (MTL::Library* ptr = lookup_cache(program)) return ptr;
-        MTL::Library* loaded = compile_library_from_program_string(program);
+        MTL::Library* loaded = compile_library_from_program_string(program, use_runtime_build);
         if (loaded) { cached_libraries[program] = loaded; }
         return loaded;
     }
 
-    MTL::Library* import_metal_source(const std::string& msl_path) {
+    MTL::Library* import_metal_source(const std::string& msl_path, bool use_runtime_build = default_value_use_runtime_build) {
         if (MTL::Library* ptr = lookup_cache(msl_path)) return ptr;
-        MTL::Library* loaded = compile_library_from_source(msl_path);
+        MTL::Library* loaded = compile_library_from_source(msl_path, use_runtime_build);
         if (loaded) { cached_libraries[msl_path] = loaded; }
         return loaded;
     }
 
-    MTL::Library* import_spirv_shader(const std::string& spv_path) {
+    MTL::Library* import_spirv_shader(const std::string& spv_path, bool use_runtime_build = default_value_use_runtime_build) {
         if (MTL::Library* ptr = lookup_cache(spv_path)) return ptr;
-        MTL::Library* loaded = load_library_from_spirv_shader(spv_path);
+        MTL::Library* loaded = load_library_from_spirv_shader(spv_path, use_runtime_build);
         if (loaded) { cached_libraries[spv_path] = loaded; }
         return loaded;
     }
 
-
-    MTL::Library* import(const std::string& lib_name) {
-        auto endsWith = [&](std::string const& ending) {
+    MTL::Library* import(const std::string& lib_name, bool use_runtime_build = default_value_use_runtime_build) {
+        auto endsWith = [&](std::string const& ending) -> bool {
             if (lib_name.length() >= ending.length()) {
                 return (0 == lib_name.compare(lib_name.length() - ending.length(), ending.length(), ending));
             } else {
@@ -123,14 +151,14 @@ public:
             }
         };
 
-        if (endsWith(".metal")) {
-            return import_metal_source(lib_name);
+        if (endsWith(".metal") || endsWith(".frag") || endsWith(".vert")) {
+            return import_metal_source(lib_name, use_runtime_build);
         } else if (endsWith(".metallib") || endsWith(".air")) {
             return import_metallib(lib_name);
         } else if (endsWith(".spv")) {
-            return import_spirv_shader(lib_name);
+            return import_spirv_shader(lib_name, use_runtime_build);
         } else {
-            return import_metal_source_string(lib_name);
+            return import_metal_source_string(lib_name, use_runtime_build);
         }
     }
 
@@ -180,7 +208,6 @@ public:
         }
         return os;
     }
-
 
     MetalLibraryLoader(MetalLibraryLoader const& other) = delete;
 
